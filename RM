@@ -1,0 +1,232 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+
+st.title("Méthode des Rangs Moyens")
+st.markdown("Entrez la gamme de production pour chaque produit (séquence des machines, ex: 'M3 - M6 - M2 - M7 - M8 - M9'). Les rangs sont assignés par position (1=premier, 2=deuxième, etc.).")
+
+# File Upload Option
+uploaded_file = st.file_uploader("Importer un fichier TXT (optionnel; une gamme par ligne, séparée par '-'), type='txt'")
+gammes = {}
+
+if uploaded_file is not None:
+    content = uploaded_file.read().decode('utf-8')
+    lines = [line.strip() for line in content.split('\n') if line.strip()]
+    num_products_from_file = len(lines)
+    st.info(f"Fichier importé avec {num_products_from_file} gammes.")
+    
+    # Extract unique machines from all sequences
+    all_machines_set = set()
+    for line in lines:
+        machines_in_seq = [m.strip() for m in line.split('-') if m.strip().startswith('M')]
+        all_machines_set.update(machines_in_seq)
+    
+    unique_machines = sorted(list(all_machines_set))
+    st.info(f"Machines détectées : {', '.join(unique_machines)}")
+    
+    # Use detected machines for num_machines
+    num_machines = st.number_input("Nombre de machines (M1 à Mm, ou utilisez les détectées)", min_value=1, value=len(unique_machines))
+    num_products = st.number_input("Nombre de produits (P1 à Pn, ou utilisez celles du fichier)", min_value=1, value=num_products_from_file)
+    
+    # Parse gammes from file
+    for i, line in enumerate(lines[:num_products], 1):
+        key = f"P{i}"
+        gammes[key] = line
+        st.text(f"{key}: {line}")
+else:
+    # Manual Input Option
+    num_products = st.number_input("Nombre de produits (P1 à Pn)", min_value=1, value=4)
+    num_machines = st.number_input("Nombre de machines (M1 à Mm)", min_value=1, value=9)
+    
+    # Collect gammes manually
+    for i in range(1, num_products + 1):
+        key = f"P{i}"
+        seq = st.text_input(
+            f"Gamme de fabrication de {key}",
+            placeholder=f"Ex: M3 - M6 - M2 - M7 - M8 - M9",
+            key=f"gamme_{i}"
+        )
+        if seq.strip():
+            gammes[key] = seq
+
+if st.button("Calculer les Rangs Moyens", type="primary"):
+    if not gammes:
+        st.warning("Veuillez entrer au moins une gamme ou importer un fichier.")
+    else:
+        # Initialize rank DataFrame
+        products = [f"P{i}" for i in range(1, num_products + 1)]
+        machines = [f"M{j}" for j in range(1, num_machines + 1)]
+        rank_df = pd.DataFrame(index=products, columns=machines, dtype=float)
+        rank_df = rank_df.fillna(np.nan)  # Use NaN for empty
+
+        # Parse sequences and assign ranks
+        for p, seq in gammes.items():
+            if p not in rank_df.index:
+                continue
+            # Split by '-' or ' - ' to handle both
+            separators = ['-', ' - ']
+            machines_in_seq = []
+            for sep in separators:
+                if sep in seq:
+                    machines_in_seq = [m.strip() for m in seq.split(sep) if m.strip().startswith('M')]
+                    break
+            else:
+                # If no separator, assume space-separated
+                machines_in_seq = [m.strip() for m in seq.split() if m.strip().startswith('M')]
+            
+            for rank, m in enumerate(machines_in_seq, 1):
+                if m in machines:
+                    rank_df.loc[p, m] = rank
+
+        # Display rank table
+        st.subheader("Table des Rangs")
+        st.dataframe(rank_df, use_container_width=True)
+
+        # Calculate summary
+        totals = rank_df.sum(axis=0)
+        counts = (rank_df > 0).sum(axis=0)
+        averages = totals / counts.replace(0, np.nan)
+
+        summary_df = pd.DataFrame({
+            "Total des rangs": totals.round(2),
+            "Nombre de rangs": counts,
+            "Rang moyen": averages.round(2)
+        })
+
+        # Sort by Rang moyen ascending, with NaN at the end
+        summary_df = summary_df.sort_values("Rang moyen", na_position='last')
+
+        st.subheader("Résumé des Rangs Moyens")
+        st.dataframe(summary_df, use_container_width=True)
+
+        # Explanation
+        st.markdown("""
+        **Explications :**
+        - **Total des rangs** : Somme des rangs pour chaque machine.
+        - **Nombre de rangs** : Nombre de fois où la machine apparaît dans une gamme.
+        - **Rang moyen** : Total des rangs / Nombre de rangs.
+        
+        Les machines avec les rangs moyens les plus bas apparaissent tôt dans les gammes et peuvent être groupées ensemble.
+        """)
+
+        # Sorted machines by average rank (all, with NaN last)
+        sorted_machines = summary_df.index.tolist()
+        st.subheader("Machines triées par Rang Moyen (croissant)")
+        st.write(", ".join(sorted_machines))
+        
+        # New: Machine Disposition Visualization
+        if len(summary_df) > 0:
+            # Prepare data for grouping, including NaN as a special group
+            summary_with_nan = summary_df.copy()
+            nan_machines = summary_with_nan[summary_with_nan["Rang moyen"].isna()].index.tolist()
+            summary_with_nan = summary_with_nan.dropna(subset=["Rang moyen"])
+            
+            # Group by exact Rang Moyen for valid ones
+            grouped = summary_with_nan.groupby("Rang moyen").apply(lambda x: x.index.tolist()).sort_index()
+            
+            # Create visualization: Columns for each group, sorted left to right by increasing rank
+            fig = go.Figure()
+            
+            column_width = 2.0
+            vertical_spacing = 1.0
+            x_offset = 0
+            
+            # First, add columns for valid rangs
+            for rank_value, group_machines in grouped.items():
+                # Stack machines vertically in this column
+                num_machines = len(group_machines)
+                y_start = (num_machines - 1) * vertical_spacing / 2  # Center vertically
+                
+                # Add machine annotations
+                for idx, machine in enumerate(group_machines):
+                    y_pos = y_start - idx * vertical_spacing
+                    fig.add_annotation(
+                        x=x_offset, y=y_pos,
+                        text=machine,
+                        showarrow=False,
+                        font=dict(size=14, color="black"),
+                        bgcolor="lightblue",
+                        bordercolor="blue",
+                        borderwidth=1
+                    )
+                
+                # Add column box (rectangle around the column/group)
+                group_min_x = x_offset - column_width / 2
+                group_max_x = x_offset + column_width / 2
+                group_min_y = y_start - (num_machines * vertical_spacing / 2) - 0.2
+                group_max_y = y_start + 0.2
+                
+                fig.add_shape(
+                    type="rect",
+                    x0=group_min_x, y0=group_min_y,
+                    x1=group_max_x, y1=group_max_y,
+                    line=dict(color="blue", width=2),
+                    fillcolor="rgba(0,0,255,0.1)"
+                )
+                
+                # Add group label (rank value) below the column
+                fig.add_annotation(
+                    x=x_offset, y=group_min_y - 0.5,
+                    text=f"Rang: {rank_value}",
+                    showarrow=False,
+                    font=dict(size=12, color="blue")
+                )
+                
+                # Move to next column
+                x_offset += column_width + 0.5  # Space between columns
+            
+            # Add a final column for NaN machines (non-utilisées)
+            if nan_machines:
+                num_machines = len(nan_machines)
+                y_start = (num_machines - 1) * vertical_spacing / 2
+                
+                for idx, machine in enumerate(nan_machines):
+                    y_pos = y_start - idx * vertical_spacing
+                    fig.add_annotation(
+                        x=x_offset, y=y_pos,
+                        text=machine,
+                        showarrow=False,
+                        font=dict(size=14, color="black"),
+                        bgcolor="lightyellow",
+                        bordercolor="orange",
+                        borderwidth=1
+                    )
+                
+                # Add column box for NaN group
+                group_min_x = x_offset - column_width / 2
+                group_max_x = x_offset + column_width / 2
+                group_min_y = y_start - (num_machines * vertical_spacing / 2) - 0.2
+                group_max_y = y_start + 0.2
+                
+                fig.add_shape(
+                    type="rect",
+                    x0=group_min_x, y0=group_min_y,
+                    x1=group_max_x, y1=group_max_y,
+                    line=dict(color="orange", width=2),
+                    fillcolor="rgba(255,165,0,0.1)"
+                )
+                
+                # Add group label
+                fig.add_annotation(
+                    x=x_offset, y=group_min_y - 0.5,
+                    text="Rang: N/A (Non utilisé)",
+                    showarrow=False,
+                    font=dict(size=12, color="orange")
+                )
+            
+            fig.update_layout(
+                title="Visualisation de la Disposition des Machines (Colonnes par Rang Moyen Identique)",
+                xaxis_title="Colonnes (du plus bas rang à gauche)",
+                yaxis_title="Machines",
+                showlegend=False,
+                height=500,
+                width=800
+            )
+            fig.update_xaxes(showgrid=False, visible=True, zeroline=False)
+            fig.update_yaxes(showgrid=False, visible=True, zeroline=False)
+            
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption("Disposition des machines en colonnes : Les groupes avec le même rang moyen sont dans une colonne verticale (seules si unique). Les colonnes sont ordonnées de gauche à droite par rang moyen croissant. Les machines non utilisées sont à la fin en jaune.")
+        else:
+            st.warning("Aucun rang moyen valide pour la visualisation.")
